@@ -1,0 +1,29 @@
+services:
+  telegram-downloader:
+    build:
+      context: .
+      args:
+        TDL_VERSION: ${TDL_VERSION:-v0.20.2}
+    image: telegram-downloader:local
+    environment:
+      APP_DATA_DIR: /data
+      DOWNLOAD_DIR: /downloads
+      TDL_STORAGE_PATH: /data/tdl
+      TDL_NS: ${TDL_NS:-default}
+      TDL_USER_ID: ${TDL_USER_ID:-}
+      TDL_PROXY: ${TDL_PROXY:-}
+      TDL_RECONNECT_TIMEOUT: ${TDL_RECONNECT_TIMEOUT:-10m}
+      TDL_NTP: ${TDL_NTP:-}
+      TDL_THREADS: ${TDL_THREADS:-4}
+      TDL_LIMIT: ${TDL_LIMIT:-2}
+      TDL_DELAY_SECONDS: ${TDL_DELAY_SECONDS:-0}
+      TDL_TAKEOUT: ${TDL_TAKEOUT:-false}
+      DOWNLOAD_RETRY_GAP_SECONDS: ${DOWNLOAD_RETRY_GAP_SECONDS:-300}
+      TZ: ${TZ:-Asia/Shanghai}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ${DATA_DIR:-./data}:/data
+      - ${DOWNLOADS_DIR:-./downloads}:/downloads
+    stdin_open: true
+    tty: true
+    restart: "no"

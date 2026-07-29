@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telegram-downloader"
+version = "0.2.0"
+description = "Docker-friendly wrapper around tdl for resumable Telegram channel downloads"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+]
+
+[project.scripts]
+telegram-downloader = "telegram_downloader.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["telegram_downloader*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
