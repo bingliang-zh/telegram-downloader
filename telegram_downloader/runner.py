@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,6 +19,8 @@ from .tdl import TdlError, TdlRunner
 
 _MESSAGE_FILE_RE = re.compile(r"^(\d+)_")
 _DEFAULT_RETRY_GAP_SECONDS = 300.0
+_TOPIC_TEXT_WINDOW_SECONDS = 300
+_TOPIC_TEXT_MAX_LENGTH = 80
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
@@ -39,18 +42,32 @@ def _read_export(path: Path) -> dict[str, Any]:
     return data
 
 
+def _message_id_from_filename(path: Path) -> int | None:
+    match = _MESSAGE_FILE_RE.match(path.name)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
 def _existing_message_ids(download_dir: Path) -> set[int]:
-    """Find completed wrapper files without treating tdl's .tmp files as done."""
+    """Find completed wrapper files without treating staging files as done."""
 
     result: set[int] = set()
     if not download_dir.exists():
         return result
-    for path in download_dir.iterdir():
+    staging_root = (download_dir / ".telegram-downloader").resolve()
+    for path in download_dir.rglob("*"):
         if not path.is_file() or path.suffix == ".tmp":
             continue
-        match = _MESSAGE_FILE_RE.match(path.name)
-        if match:
-            result.add(int(match.group(1)))
+        try:
+            path.resolve().relative_to(staging_root)
+        except ValueError:
+            pass
+        else:
+            continue
+        message_id = _message_id_from_filename(path)
+        if message_id is not None:
+            result.add(message_id)
     return result
 
 
@@ -60,6 +77,9 @@ def _prepare_manifest(source: Path, manifest: Path, download_dir: Path) -> int:
     messages = []
     for message in data["messages"]:
         if not isinstance(message, dict):
+            continue
+        file_name = message.get("file")
+        if not isinstance(file_name, str) or not file_name.strip():
             continue
         message_id = message.get("id")
         if isinstance(message_id, int) and message_id in existing_ids:
@@ -76,6 +96,296 @@ def _manifest_message_ids(manifest: Path) -> set[int]:
         for message in _read_export(manifest)["messages"]
         if isinstance(message, dict) and isinstance(message.get("id"), int)
     }
+
+
+def _raw_message(message: dict[str, Any]) -> dict[str, Any] | None:
+    raw = message.get("raw")
+    return raw if isinstance(raw, dict) else None
+
+
+def _message_timestamp(message: dict[str, Any]) -> int | None:
+    timestamp = _int_value(message.get("date"))
+    if timestamp is not None:
+        return timestamp
+    raw = _raw_message(message)
+    if raw is None:
+        return None
+    return _int_value(raw.get("date") or raw.get("Date"))
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    raw = _raw_message(message)
+    for source in (message, raw or {}):
+        for key in ("text", "Text", "message", "Message"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _message_grouped_id(message: dict[str, Any]) -> int | None:
+    raw = _raw_message(message)
+    for source in (message, raw or {}):
+        for key in ("grouped_id", "groupedId", "GroupedID"):
+            grouped_id = _int_value(source.get(key))
+            if grouped_id is not None:
+                return grouped_id
+    return None
+
+
+def _message_has_file(message: dict[str, Any]) -> bool:
+    file_name = message.get("file")
+    return isinstance(file_name, str) and bool(file_name.strip())
+
+
+def _is_text_topic_candidate(text: str) -> bool:
+    return (
+        bool(text)
+        and len(text) <= _TOPIC_TEXT_MAX_LENGTH
+        and "\n" not in text
+        and "\r" not in text
+    )
+
+
+def _int_value(value: Any) -> int | None:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result > 0 else None
+
+
+def _message_topic_id(message: dict[str, Any]) -> int | None:
+    """Read a Telegram forum topic ID from tdl's raw message JSON."""
+
+    raw = _raw_message(message)
+    if raw is None:
+        return _int_value(message.get("topic_id"))
+
+    for key in ("topic_id", "topicId", "TopicID", "thread_id", "threadId"):
+        topic_id = _int_value(raw.get(key))
+        if topic_id is not None:
+            return topic_id
+
+    reply_to = raw.get("reply_to") or raw.get("replyTo") or raw.get("ReplyTo")
+    if isinstance(reply_to, dict):
+        forum_topic = reply_to.get("ForumTopic", reply_to.get("forum_topic"))
+        if forum_topic is False:
+            return _int_value(message.get("topic_id"))
+        for key in (
+            "reply_to_top_id", "replyToTopID", "reply_to_top_msg_id",
+            "ReplyToTopID", "ReplyToTopMsgID",
+        ):
+            topic_id = _int_value(reply_to.get(key))
+            if topic_id is not None:
+                return topic_id
+    return _int_value(message.get("topic_id"))
+
+
+def _message_date_folder(message: dict[str, Any]) -> str:
+    timestamp = _message_timestamp(message)
+    if timestamp is None:
+        return "unknown-date"
+    try:
+        # The container's TZ setting defines the archive's local calendar date.
+        return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
+    except (OverflowError, OSError, ValueError):
+        return "unknown-date"
+
+
+def _safe_folder_component(value: str, *, max_length: int = 80) -> str:
+    value = unicodedata.normalize("NFKC", str(value)).strip()
+    value = re.sub(r"[\x00-\x1f\x7f<>:\"/\\|?*]", "_", value)
+    value = re.sub(r"\s+", " ", value).strip(" .")
+    return (value[:max_length].rstrip(" .") or "untitled")
+
+
+def _message_download_directory(
+    download_root: Path,
+    message: dict[str, Any],
+) -> Path:
+    directory = _message_date_folder(message)
+    topic_source = str(message.get("topic_source", "")).strip()
+    topic_title = str(message.get("topic_title", "")).strip()
+    if topic_source in {"caption", "text"} and topic_title:
+        return download_root / f"{directory}_{_safe_folder_component(topic_title)}"
+    topic_id = _message_topic_id(message)
+    if topic_id is not None:
+        title = topic_title or f"topic-{topic_id}"
+        directory += f"_{topic_id}_{_safe_folder_component(title)}"
+    return download_root / directory
+
+
+def _enrich_export(source: Path, topic_titles: dict[int, str]) -> None:
+    """Add stable date/topic fields to the tdl export used by the manifest.
+
+    Telegram group albums carry their subject as a caption on one album
+    message, while the other messages in the same ``GroupedID`` are blank.
+    Plain text immediately before an uncaptioned media run is also accepted
+    as a topic for a short, same-day window.
+    """
+
+    data = _read_export(source)
+    messages = [message for message in data["messages"] if isinstance(message, dict)]
+    changed = False
+
+    def set_field(message: dict[str, Any], key: str, value: Any) -> None:
+        nonlocal changed
+        if value is None:
+            if key in message:
+                del message[key]
+                changed = True
+            return
+        if message.get(key) != value:
+            message[key] = value
+            changed = True
+
+    for message in messages:
+        timestamp = _message_timestamp(message)
+        if "date" not in message and timestamp is not None:
+            set_field(message, "date", timestamp)
+        topic_id = _message_topic_id(message)
+        set_field(message, "topic_id", topic_id)
+        if topic_id is not None:
+            title = topic_titles.get(topic_id, f"topic-{topic_id}")
+            set_field(message, "topic_title", title)
+            set_field(message, "topic_source", "forum")
+
+    ordered = sorted(
+        messages,
+        key=lambda item: (_message_timestamp(item) or 0, _int_value(item.get("id")) or 0),
+    )
+    albums: dict[int, list[dict[str, Any]]] = {}
+    album_captions: dict[int, str] = {}
+    for message in ordered:
+        if not _message_has_file(message):
+            continue
+        grouped_id = _message_grouped_id(message)
+        if grouped_id is not None:
+            albums.setdefault(grouped_id, []).append(message)
+            caption = _message_text(message)
+            if caption and grouped_id not in album_captions:
+                album_captions[grouped_id] = caption
+
+    pending_text: tuple[int, str] | None = None
+    handled_albums: set[int] = set()
+    for message in ordered:
+        timestamp = _message_timestamp(message)
+        if not _message_has_file(message):
+            text = _message_text(message)
+            if timestamp is not None and _is_text_topic_candidate(text):
+                pending_text = (timestamp, text)
+            continue
+
+        grouped_id = _message_grouped_id(message)
+        if grouped_id is not None:
+            if grouped_id in handled_albums:
+                continue
+            handled_albums.add(grouped_id)
+            members = albums[grouped_id]
+            caption = album_captions.get(grouped_id, "")
+        else:
+            members = [message]
+            caption = _message_text(message)
+
+        topic = caption
+        source_name = "caption" if caption else ""
+        if not topic and pending_text is not None and timestamp is not None:
+            pending_timestamp, pending_topic = pending_text
+            same_day = _message_date_folder(message) == _message_date_folder(
+                {"date": pending_timestamp}
+            )
+            if same_day and 0 <= timestamp - pending_timestamp <= _TOPIC_TEXT_WINDOW_SECONDS:
+                topic = pending_topic
+                source_name = "text"
+
+        if topic:
+            for member in members:
+                set_field(member, "topic_title", topic)
+                set_field(member, "topic_source", source_name)
+    if changed:
+        _write_json(source, data)
+
+
+def _topic_titles(tdl: TdlRunner, chat_id: str) -> dict[int, str]:
+    getter = getattr(tdl, "topics_for_chat", None)
+    if not callable(getter):
+        return {}
+    try:
+        return getter(chat_id)
+    except (TdlError, OSError, RuntimeError, ValueError) as exc:
+        print(f"WARN: Could not load Telegram topic names ({exc}); using topic IDs.", flush=True)
+        return {}
+
+
+def _relocate_downloads(
+    work_dir: Path,
+    download_root: Path,
+    manifest: Path,
+) -> None:
+    """Move completed flat tdl files into date/topic directories."""
+
+    messages = {
+        int(message["id"]): message
+        for message in _read_export(manifest)["messages"]
+        if isinstance(message, dict) and _int_value(message.get("id")) is not None
+    }
+    if not work_dir.is_dir():
+        return
+    for path in sorted(work_dir.iterdir()):
+        if not path.is_file() or path.suffix == ".tmp":
+            continue
+        message_id = _message_id_from_filename(path)
+        if message_id is None or message_id not in messages:
+            continue
+        target = _message_download_directory(download_root, messages[message_id]) / path.name
+        _copy_without_overwrite(path, target)
+
+    if work_dir != download_root:
+        for directory in sorted(
+            (path for path in work_dir.rglob("*") if path.is_dir()),
+            reverse=True,
+        ):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        try:
+            work_dir.rmdir()
+        except OSError:
+            pass
+        for parent in (work_dir.parent, work_dir.parent.parent):
+            try:
+                parent.rmdir()
+            except OSError:
+                pass
+
+
+def _relocate_existing_downloads(download_root: Path, source: Path) -> None:
+    """Organize already downloaded files covered by a new metadata export."""
+
+    messages = {
+        int(message["id"]): message
+        for message in _read_export(source)["messages"]
+        if isinstance(message, dict) and _int_value(message.get("id")) is not None
+    }
+    staging_root = (download_root / ".telegram-downloader").resolve()
+    for path in sorted(download_root.rglob("*")):
+        if not path.is_file() or path.suffix == ".tmp":
+            continue
+        try:
+            path.resolve().relative_to(staging_root)
+        except ValueError:
+            pass
+        else:
+            continue
+        message_id = _message_id_from_filename(path)
+        if message_id is None or message_id not in messages:
+            continue
+        target = _message_download_directory(download_root, messages[message_id]) / path.name
+        if path.resolve() == target.resolve():
+            continue
+        _copy_without_overwrite(path, target)
 
 
 def _work_progress(
@@ -270,6 +580,7 @@ def run_once(
     state: StateStore,
     *,
     tdl: TdlRunner | None = None,
+    export_days: int | None = None,
 ) -> int:
     """Export one channel and download its not-yet-present media."""
 
@@ -293,7 +604,7 @@ def run_once(
         job_hint.mkdir(parents=True, exist_ok=True)
         source = job_hint / "export.json"
         manifest = job_hint / "manifest.json"
-        work_dir = config.download_dir
+        work_dir = paths.staging_dir / job_hint.name
         run_id = state.create_run(
             channel=config.channel,
             media_types=",".join(config.media_types),
@@ -307,6 +618,7 @@ def run_once(
         job_hint.rename(final_job_dir)
         source = final_job_dir / "export.json"
         manifest = final_job_dir / "manifest.json"
+        work_dir = paths.staging_dir / str(run_id)
         state.update_run(
             run_id,
             source_path=str(source),
@@ -324,7 +636,10 @@ def run_once(
                 ended_at=None,
                 last_error=None,
             )
-            return_code = tdl.export(config, source)
+            if export_days is None:
+                return_code = tdl.export(config, source)
+            else:
+                return_code = tdl.export(config, source, days=export_days)
             if return_code != 0:
                 # tdl may leave a partial export file behind when the Telegram
                 # connection is lost. It must not be reused on the next retry.
@@ -340,16 +655,19 @@ def run_once(
                 return return_code or 1
 
         # The export's top-level ID is the canonical Telegram peer ID. The
-        # target is stable across daily runs and retries, unlike old per-run
+        # target is stable across daily runs and retries, unlike per-run
         # staging directories.
-        work_dir = _download_target(paths, config, tdl, source)
-        state.update_run(run_id, work_dir=str(work_dir))
-        _merge_matching_staging(paths, state, config, work_dir)
+        chat_id = _export_chat_id(source)
+        _enrich_export(source, _topic_titles(tdl, chat_id))
+        download_root = _download_target(paths, config, tdl, source)
+        _relocate_existing_downloads(download_root, source)
+        if active is None:
+            _merge_matching_staging(paths, state, config, download_root)
 
         # Rebuild from the immutable export on every retry. Existing files in
         # this account/chat directory are excluded by message ID.
         state.update_run(run_id, status="running", stage="preparing")
-        expected = _prepare_manifest(source, manifest, work_dir)
+        expected = _prepare_manifest(source, manifest, download_root)
         state.update_run(run_id, expected=expected)
 
         if expected == 0:
@@ -364,6 +682,7 @@ def run_once(
                 temp_files=0,
                 return_code=0,
                 last_error=None,
+                work_dir=str(download_root),
             )
             return 0
 
@@ -425,6 +744,7 @@ def run_once(
             )
             return return_code or 1
 
+        _relocate_downloads(work_dir, download_root, manifest)
         state.update_run(
             run_id,
             status="completed",
@@ -435,6 +755,7 @@ def run_once(
             temp_files=temp_files,
             return_code=0,
             last_error=None,
+            work_dir=str(download_root),
         )
         return 0
     except Exception as exc:

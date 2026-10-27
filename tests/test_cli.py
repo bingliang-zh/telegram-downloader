@@ -10,6 +10,7 @@ def test_parser_exposes_wrapper_commands():
     assert init_args.login_type == "code"
     assert parser.parse_args(["login", "--type", "code"]).type == "code"
     assert parser.parse_args(["status", "--json"]).json is True
+    assert parser.parse_args(["run", "--days", "2"]).days == 2
 
 
 def test_config_answers_are_serializable(tmp_path):

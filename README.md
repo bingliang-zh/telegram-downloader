@@ -69,6 +69,7 @@ docker compose restart
 
 ```bash
 docker compose run --rm telegram-downloader run
+docker compose run --rm telegram-downloader run --days 2
 docker compose run --rm telegram-downloader status
 docker compose run --rm telegram-downloader status --json
 docker compose run --rm telegram-downloader tdl-version
@@ -76,6 +77,10 @@ docker compose run --rm telegram-downloader reset
 ```
 
 `run` continues unfinished work. `reset` abandons only the current job record and does not delete downloaded files; you can run `run` again afterward.
+
+`run --days N` limits that one-shot export to messages from the most recent `N` days. The daily daemon continues to use the full chat history and skips already indexed messages.
+
+New files are downloaded into a temporary resumable staging directory and then organized under `<user-id>/<chat-id>/<YYYY-MM-DD>[_<topic>]/`. For a Telegram media album, the caption is used as the topic for every file with the same `GroupedID`; a short plain-text message immediately before uncaptioned media can also provide a same-day topic. Unlabelled media stays in the date-only directory. Native Forum topics remain supported as a fallback. Existing flat files are recognized by message ID and reorganized when their metadata is available; files are never overwritten.
 
 The lower-level `login` and `channels` commands remain available for troubleshooting, but they are not required during normal first-time setup.
 
@@ -108,6 +113,8 @@ The interactive `init` command saves configuration to `data/config.json`. Docker
 | --- | --- | --- |
 | `DATA_DIR` | `./data` | Persistent data directory on the host |
 | `DOWNLOADS_DIR` | `./downloads` | Download directory on the host |
+| `DOWNLOAD_MOUNT_MARKER` | Empty | Optional container path of a file that must exist before the service starts; use this for a required RAID/NFS bind mount |
+| `PUID` / `PGID` | `10001` | UID/GID used by the container; set them to the host user that owns an external download mount |
 | `TDL_NS` | `default` | tdl account namespace; keep it stable after login |
 | `TDL_USER_ID` | Empty | Optional Telegram user ID override; normally detected and saved by `init` |
 | `TDL_PROXY` | Empty | Proxy URL supported by tdl |

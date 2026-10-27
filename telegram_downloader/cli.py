@@ -62,7 +62,12 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("channels", help="list chats/channels from the logged-in account")
     commands.add_parser("tdl-version", help="show the installed tdl version")
 
-    commands.add_parser("run", help="run one download job, resuming an interrupted job")
+    run = commands.add_parser("run", help="run one download job, resuming an interrupted job")
+    run.add_argument(
+        "--days",
+        type=int,
+        help="limit this one-shot export to the most recent number of days",
+    )
 
     commands.add_parser("daemon", help="run now and repeat daily when enabled")
 
@@ -390,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(paths)
         ensure_tdl_available(paths)
         if args.command == "run":
-            return run_once(paths, config, state, tdl=tdl)
+            return run_once(paths, config, state, tdl=tdl, export_days=args.days)
         if args.command == "daemon":
             return run_daemon(paths, state, tdl=tdl)
     except (KeyboardInterrupt, EOFError):

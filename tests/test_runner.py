@@ -4,6 +4,9 @@ from pathlib import Path
 from telegram_downloader.config import AppPaths, DownloadConfig, save_config
 from telegram_downloader.runner import (
     _copy_without_overwrite,
+    _enrich_export,
+    _message_download_directory,
+    _message_topic_id,
     _prepare_manifest,
     _work_progress,
     run_once,
@@ -17,6 +20,10 @@ def make_paths(tmp_path: Path) -> AppPaths:
 
 
 def target_file(paths: AppPaths) -> Path:
+    return paths.download_dir / "default" / "-100123" / "unknown-date" / "1_photo.jpg"
+
+
+def legacy_target_file(paths: AppPaths) -> Path:
     return paths.download_dir / "default" / "-100123" / "1_photo.jpg"
 
 
@@ -56,17 +63,87 @@ class FakeTdl:
 
 def test_prepare_manifest_excludes_completed_message(tmp_path):
     download_dir = tmp_path / "downloads"
-    download_dir.mkdir()
-    (download_dir / "10_existing.jpg").write_bytes(b"done")
+    (download_dir / "2026-08-03_42_Travel").mkdir(parents=True)
+    (download_dir / "2026-08-03_42_Travel" / "10_existing.jpg").write_bytes(b"done")
     source = tmp_path / "export.json"
     manifest = tmp_path / "manifest.json"
     source.write_text(
-        json.dumps({"messages": [{"id": 10}, {"id": 11}]}),
+        json.dumps({
+            "messages": [
+                {"id": 10, "file": "10.jpg"},
+                {"id": 11, "file": "11.jpg"},
+                {"id": 12, "text": "not media"},
+            ]
+        }),
         encoding="utf-8",
     )
 
     assert _prepare_manifest(source, manifest, download_dir) == 1
     assert [item["id"] for item in json.loads(manifest.read_text())["messages"]] == [11]
+
+
+def test_caption_topics_cover_an_entire_album_and_text_headers_cover_unlabelled_media(tmp_path):
+    source = tmp_path / "export.json"
+    source.write_text(
+        json.dumps({
+            "id": -100123,
+            "messages": [
+                {"id": 1, "type": "message", "date": 1000, "text": "White Dress"},
+                {
+                    "id": 2,
+                    "type": "message",
+                    "file": "2.jpg",
+                    "date": 1010,
+                    "raw": {"GroupedID": 7, "Message": ""},
+                },
+                {
+                    "id": 3,
+                    "type": "message",
+                    "file": "3.jpg",
+                    "date": 1010,
+                    "raw": {"GroupedID": 7, "Message": ""},
+                },
+                {
+                    "id": 4,
+                    "type": "message",
+                    "file": "4.jpg",
+                    "date": 1020,
+                    "raw": {"GroupedID": 8, "Message": "Battle Robe"},
+                },
+                {
+                    "id": 5,
+                    "type": "message",
+                    "file": "5.jpg",
+                    "date": 1030,
+                    "raw": {"GroupedID": 9, "Message": ""},
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    _enrich_export(source, {})
+    messages = {
+        item["id"]: item
+        for item in json.loads(source.read_text(encoding="utf-8"))["messages"]
+    }
+
+    assert messages[2]["topic_title"] == "White Dress"
+    assert messages[3]["topic_title"] == "White Dress"
+    assert messages[2]["topic_source"] == "text"
+    assert messages[4]["topic_title"] == "Battle Robe"
+    assert messages[4]["topic_source"] == "caption"
+    assert messages[5]["topic_title"] == "White Dress"
+    assert _message_download_directory(tmp_path, messages[2]).name == "1970-01-01_White Dress"
+
+
+def test_only_forum_replies_are_grouped_as_topics():
+    assert _message_topic_id({
+        "raw": {"ReplyTo": {"ForumTopic": False, "ReplyToTopID": 4170}}
+    }) is None
+    assert _message_topic_id({
+        "raw": {"ReplyTo": {"ForumTopic": True, "ReplyToTopID": 4170}}
+    }) == 4170
 
 
 def test_copy_without_overwrite_preserves_existing_file(tmp_path):
@@ -190,8 +267,49 @@ def test_next_run_reuses_staging_from_previous_failed_run(tmp_path):
     assert run_once(paths, config, state, tdl=fake) == 0
     assert fake.work_dir is None
     assert fake.preexisting_file is False
-    assert target_file(paths).read_bytes() == b"already downloaded"
+    assert legacy_target_file(paths).read_bytes() == b"already downloaded"
     assert not legacy_work_dir.exists()
+
+
+def test_downloads_are_grouped_by_message_date_and_topic(tmp_path):
+    paths = make_paths(tmp_path)
+    state = StateStore(paths.state_db)
+    config = DownloadConfig(channel="@example", download_dir=paths.download_dir)
+    save_config(paths, config)
+
+    class TopicTdl(FakeTdl):
+        def export(self, config, output):
+            output.write_text(
+                json.dumps(
+                    {
+                        "id": -100123,
+                        "messages": [
+                            {
+                                "id": 1,
+                                "type": "message",
+                                "file": "1_photo.jpg",
+                                "date": 1,
+                                "topic_id": 42,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return 0
+
+        def topics_for_chat(self, chat_id):
+            return {42: "Travel / Photos"}
+
+    fake = TopicTdl()
+
+    assert run_once(paths, config, state, tdl=fake) == 0
+    grouped_file = (
+        paths.download_dir / "default" / "-100123" /
+        "1970-01-01_42_Travel _ Photos" / "1_photo.jpg"
+    )
+    assert grouped_file.read_bytes() == b"media"
+    assert not (paths.download_dir / "default" / "-100123" / "1_photo.jpg").exists()
 
 
 def test_work_progress_counts_temporary_files(tmp_path):

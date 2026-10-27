@@ -8,12 +8,14 @@ services:
     environment:
       APP_DATA_DIR: /data
       DOWNLOAD_DIR: /downloads
+      HOME: ${CONTAINER_HOME:-/data}
       TDL_STORAGE_PATH: /data/tdl
       TDL_NS: ${TDL_NS:-default}
       TDL_USER_ID: ${TDL_USER_ID:-}
       TDL_PROXY: ${TDL_PROXY:-}
       TDL_RECONNECT_TIMEOUT: ${TDL_RECONNECT_TIMEOUT:-10m}
       TDL_NTP: ${TDL_NTP:-}
+      DOWNLOAD_MOUNT_MARKER: ${DOWNLOAD_MOUNT_MARKER:-}
       TDL_THREADS: ${TDL_THREADS:-4}
       TDL_LIMIT: ${TDL_LIMIT:-2}
       TDL_DELAY_SECONDS: ${TDL_DELAY_SECONDS:-0}
@@ -21,9 +23,18 @@ services:
       DOWNLOAD_RETRY_GAP_SECONDS: ${DOWNLOAD_RETRY_GAP_SECONDS:-300}
       TZ: ${TZ:-Asia/Shanghai}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    user: "${PUID:-10001}:${PGID:-10001}"
     volumes:
-      - ${DATA_DIR:-./data}:/data
-      - ${DOWNLOADS_DIR:-./downloads}:/downloads
+      - type: bind
+        source: ${DATA_DIR:-./data}
+        target: /data
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${DOWNLOADS_DIR:-./downloads}
+        target: /downloads
+        bind:
+          create_host_path: false
     stdin_open: true
     tty: true
     restart: "no"

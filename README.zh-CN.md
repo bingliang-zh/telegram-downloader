@@ -69,6 +69,7 @@ docker compose restart
 
 ```bash
 docker compose run --rm telegram-downloader run
+docker compose run --rm telegram-downloader run --days 2
 docker compose run --rm telegram-downloader status
 docker compose run --rm telegram-downloader status --json
 docker compose run --rm telegram-downloader tdl-version
@@ -76,6 +77,10 @@ docker compose run --rm telegram-downloader reset
 ```
 
 `run` 会继续未完成的任务。`reset` 只放弃当前任务记录，不删除已经下载的文件；之后可以重新 `run`。
+
+`run --days N` 只限制这一次执行，导出最近 `N` 天的消息。每日 daemon 仍然使用完整聊天记录，并跳过已经建立索引的消息。
+
+新文件会先进入可断点续传的临时目录，成功后整理到 `<用户ID>/<群组ID>/<YYYY-MM-DD>[_<topic>]/`。Telegram 相册中带 caption 的消息会作为 topic，并应用到同一个 `GroupedID` 的全部图片；紧接着未标注媒体之前、同日 5 分钟内的短纯文字消息也可以作为 topic。没有标签的媒体仍放在只有日期的目录中。原生 Forum topic 仍作为 fallback 支持。如果已有旧文件的消息元数据可用，wrapper 也会将其整理到新目录；不会覆盖文件。
 
 `login` 和 `channels` 仍然保留为排障用的底层命令，但首次配置不需要单独执行它们。
 
@@ -106,6 +111,8 @@ SQLite 中会保存任务阶段、预计文件数、已完成文件数、字节�
 | --- | --- | --- |
 | `DATA_DIR` | `./data` | 宿主机持久化数据目录 |
 | `DOWNLOADS_DIR` | `./downloads` | 宿主机下载目录 |
+| `DOWNLOAD_MOUNT_MARKER` | 空 | 可选的容器内标记文件路径；设置后，标记文件不存在时服务会拒绝启动，适合 RAID/NFS 等外部挂载 |
+| `PUID` / `PGID` | `10001` | 容器运行使用的 UID/GID；外部下载目录由宿主机用户拥有时设置为该用户的 UID/GID |
 | `TDL_NS` | `default` | tdl 账户 namespace；登录后不要随意修改 |
 | `TDL_USER_ID` | 空 | 可选的 Telegram 用户 ID；通常由 `init` 自动保存，不需要手动设置 |
 | `TDL_PROXY` | 空 | tdl 支持的代理地址 |

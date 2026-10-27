@@ -29,6 +29,9 @@ def test_tdl_commands_use_persistent_storage(tmp_path, monkeypatch):
     export = captured["args"]
     assert "--filter" in export
     assert 'Media.Name endsWith ".jpg"' in export[export.index("--filter") + 1]
+    assert "--with-content" in export
+    assert "--raw" in export
+    assert "--all" in export
     assert captured["config"] is config
 
 
@@ -46,6 +49,38 @@ def test_list_chats_json_parses_tdl_dialog_array(tmp_path, monkeypatch):
     assert runner.list_chats_json() == [
         {"id": 42, "type": "channel", "visible_name": "Example"}
     ]
+
+
+def test_topics_for_chat_reads_topic_titles(tmp_path, monkeypatch):
+    paths = AppPaths(tmp_path / "data", tmp_path / "downloads", tmp_path / "data" / "tdl")
+    runner = TdlRunner(paths, executable="tdl-test")
+    monkeypatch.setattr(
+        runner,
+        "list_chats_json",
+        lambda: [{"id": 42, "topics": [{"id": 7, "title": "Travel"}]}],
+    )
+
+    assert runner.topics_for_chat(42) == {7: "Travel"}
+
+
+def test_export_days_uses_a_time_range(tmp_path, monkeypatch):
+    paths = AppPaths(tmp_path / "data", tmp_path / "downloads", tmp_path / "data" / "tdl")
+    runner = TdlRunner(paths, executable="tdl-test")
+    config = DownloadConfig(channel="@example")
+    captured = {}
+
+    monkeypatch.setattr("telegram_downloader.tdl.time.time", lambda: 100000)
+
+    def fake_run_interactive(args, *, config=None):
+        captured["args"] = list(args)
+        return 0
+
+    runner.run_interactive = fake_run_interactive
+    runner.export(config, tmp_path / "export.json", days=2)
+
+    export = captured["args"]
+    assert export[export.index("--type") + 1] == "time"
+    assert export[export.index("--input") + 1] == "-72800,100000"
 
 
 def test_namespace_data_can_be_checked_and_cleared(tmp_path):

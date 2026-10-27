@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -81,19 +82,60 @@ class TdlRunner:
             ) from exc
         return int(completed.returncode)
 
-    def export(self, config: DownloadConfig, output: Path) -> int:
+    def export(
+        self,
+        config: DownloadConfig,
+        output: Path,
+        *,
+        days: int | None = None,
+    ) -> int:
         output.parent.mkdir(parents=True, exist_ok=True)
+        if days is not None and days < 1:
+            raise ValueError("days must be greater than 0")
+        now = int(time.time())
+        export_type = "id"
+        export_input = "0,2147483647"
+        if days is not None:
+            export_type = "time"
+            export_input = f"{now - days * 86400},{now}"
         return self.run_interactive(
             (
                 "chat", "export",
                 "--chat", config.channel,
-                "--type", "id",
-                "--input", "0,2147483647",
+                "--type", export_type,
+                "--input", export_input,
                 "--filter", config.filter_expression(),
+                "--all",
+                "--with-content",
+                "--raw",
                 "--output", str(output),
             ),
             config=config,
         )
+
+    def topics_for_chat(self, chat_id: str | int) -> dict[int, str]:
+        """Return the known forum topic titles for a chat."""
+
+        wanted = str(chat_id).strip()
+        for dialog in self.list_chats_json():
+            if str(dialog.get("id", "")).strip() != wanted:
+                continue
+            topics = dialog.get("topics", [])
+            if not isinstance(topics, list):
+                return {}
+            result: dict[int, str] = {}
+            for topic in topics:
+                if not isinstance(topic, dict):
+                    continue
+                try:
+                    topic_id = int(topic.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                title = str(topic.get("title", "")).strip()
+                if title:
+                    result[topic_id] = title
+            return result
+        return {}
 
     def download(self, config: DownloadConfig, manifest: Path, work_dir: Path) -> int:
         work_dir.mkdir(parents=True, exist_ok=True)

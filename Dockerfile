@@ -20,9 +20,11 @@ WORKDIR /app
 
 COPY pyproject.toml README.md LICENSE ./
 COPY telegram_downloader ./telegram_downloader
+COPY docker-entrypoint.sh /usr/local/bin/telegram-downloader-entrypoint
 COPY --from=tdl-builder /out/tdl /usr/local/bin/tdl
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . \
+    && chmod +x /usr/local/bin/telegram-downloader-entrypoint
 
 RUN mkdir -p /data /downloads \
     && useradd --create-home --uid 10001 appuser \
@@ -30,5 +32,5 @@ RUN mkdir -p /data /downloads \
 
 USER appuser
 
-ENTRYPOINT ["telegram-downloader"]
+ENTRYPOINT ["/usr/local/bin/telegram-downloader-entrypoint"]
 CMD ["daemon"]
